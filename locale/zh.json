@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepSeek 网页版",
+    "description": "在左侧栏打开 DeepSeek 网页版面板，自动恢复登录并显示中文界面；可导入 DSH 对话，自带 deepseek-web-ask 技能与 deepseek_web_ask 工具，支持多轮追问和「本会话都允许」。"
+  }
+}

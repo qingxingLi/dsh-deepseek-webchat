@@ -1,0 +1,7 @@
+# Bundle row for the DeepSeek web-chat panel. The panel embeds the page through the
+# desktop shell's approved webview guest lease, which only exists in the Desktop
+# profile, so keep the row off elsewhere.
+- insert:
+    - id: deepseek-webchat
+      name: 'dsh-deepseek-webchat'
+      disabled: !!js "ctx.get('profileContext')?.name !== 'desktop'"

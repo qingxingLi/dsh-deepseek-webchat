@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepSeek Web",
+    "description": "DeepSeek web chat panel with restored sign-in, Chinese UI, conversation import, and the deepseek-web-ask skill plus deepseek_web_ask tool supporting multi-turn questions and per-session approval."
+  }
+}
