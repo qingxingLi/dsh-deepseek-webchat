@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
     /** Host bridge for agent-initiated questions: same-origin routes on the Host web server. */
     const BRIDGE_POLL_PATH = '/dsh-deepseek-webchat/poll';
     const BRIDGE_RESULT_PATH = '/dsh-deepseek-webchat/result';
+    const BRIDGE_CLIPBOARD_PATH = '/dsh-deepseek-webchat/clipboard';
     const ASK_WAIT_MS = 120000;
     const ASK_PANEL_WAIT_MS = 30000;
 
@@ -56,6 +57,13 @@ window.__ModuleLoader__.load({
       'ask.sending': '正在发送到网页版…',
       'ask.waiting': '已发送，等待网页版回复…',
       'ask.always': '本会话都允许',
+      'clipboard.copy': '复制选中',
+      'clipboard.paste': '粘贴',
+      'clipboard.empty': '没有选中文本',
+      'clipboard.copied': '已复制选中内容',
+      'clipboard.pasted': '已粘贴到网页版输入框',
+      'clipboard.noComposer': '在网页版页面上找不到输入框',
+      'clipboard.failed': '剪贴板操作失败',
       'share.title': '选择要分享到 DeepSeek 网页版的对话',
       'share.all': '全选',
       'share.none': '全不选',
@@ -94,6 +102,13 @@ window.__ModuleLoader__.load({
       'ask.sending': 'Sending to the web chat…',
       'ask.waiting': 'Sent; waiting for the web chat reply…',
       'ask.always': 'Allow for this session',
+      'clipboard.copy': 'Copy selection',
+      'clipboard.paste': 'Paste',
+      'clipboard.empty': 'Nothing is selected',
+      'clipboard.copied': 'Selection copied',
+      'clipboard.pasted': 'Pasted into the web composer',
+      'clipboard.noComposer': 'Could not find the web composer',
+      'clipboard.failed': 'Clipboard operation failed',
       'share.title': 'Choose the conversation to share with DeepSeek web chat',
       'share.all': 'Select all',
       'share.none': 'Select none',
@@ -110,6 +125,9 @@ window.__ModuleLoader__.load({
     const CSS = [
       '.dsw-deepseek-webchat-panel{position:relative;display:flex;flex-direction:column;flex:1 1 auto;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base)}',
       '.dsw-deepseek-webchat-stage{display:flex;flex:1 1 auto;min-width:0;min-height:0}',
+      '.dsw-deepseek-webchat-toolbar{display:flex;align-items:center;gap:6px;flex:none;padding:4px 8px;background:var(--dsw-alias-bg-layer-2);border-bottom:0.5px solid var(--dsw-alias-border-l3)}',
+      '.dsw-deepseek-webchat-tool{display:inline-flex;align-items:center;height:24px;padding:0 10px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xxs-12);cursor:pointer}',
+      '.dsw-deepseek-webchat-tool:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary)}',
       '.dsw-deepseek-webchat-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-secondary);font:var(--dsw-font-xs-13);pointer-events:none}',
       '.dsw-deepseek-webchat-overlay[data-interactive="true"]{pointer-events:auto}',
       '.dsw-deepseek-webchat-title{margin:0;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xs-13);font-weight:600}',
@@ -354,6 +372,84 @@ window.__ModuleLoader__.load({
 })()`;
     }
 
+    /** Selected text in the guest page (selection or focused text field). */
+    function selectionScript() {
+      return `(() => {
+  const active = document.activeElement;
+  if (active !== null && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT') && typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number' && active.selectionEnd > active.selectionStart) {
+    return JSON.stringify(active.value.slice(active.selectionStart, active.selectionEnd));
+  }
+  const selection = window.getSelection();
+  return JSON.stringify(selection === null ? '' : String(selection.toString()));
+})()`;
+    }
+
+    /**
+     * Make the guest page's async clipboard writes fall back to the Host bridge. The
+     * guest session denies the Clipboard API permission, so the page's own copy
+     * buttons would otherwise fail silently.
+     */
+    function clipboardBridgeScript() {
+      return `(() => {
+  if (window.__dshClipboardBridgeInstalled === true) return true;
+  window.__dshClipboardBridgeInstalled = true;
+  const request = (text) => {
+    window.__dshClipboardWriteSeq = (window.__dshClipboardWriteSeq || 0) + 1;
+    window.__dshClipboardWriteRequest = { text: String(text), seq: window.__dshClipboardWriteSeq };
+  };
+  const clipboard = navigator.clipboard;
+  if (clipboard === undefined || clipboard === null) return false;
+  const originalWriteText = clipboard.writeText === undefined ? undefined : clipboard.writeText.bind(clipboard);
+  try {
+    Object.defineProperty(clipboard, 'writeText', {
+      configurable: true,
+      value: async (text) => {
+        try {
+          if (originalWriteText !== undefined) return await originalWriteText(text);
+        } catch (error) {
+          // permission denied; fall through to the Host bridge
+        }
+        request(text);
+      },
+    });
+  } catch (error) {}
+  const originalWrite = clipboard.write === undefined ? undefined : clipboard.write.bind(clipboard);
+  try {
+    Object.defineProperty(clipboard, 'write', {
+      configurable: true,
+      value: async (items) => {
+        try {
+          if (originalWrite !== undefined) return await originalWrite(items);
+        } catch (error) {
+          // permission denied; fall through to the Host bridge
+        }
+        const texts = [];
+        for (const item of items ?? []) {
+          for (const type of item.types ?? []) {
+            if (type !== 'text/plain') continue;
+            try {
+              texts.push(await (await item.getType(type)).text());
+            } catch (error) {}
+          }
+        }
+        if (texts.length > 0) request(texts.join(String.fromCharCode(10)));
+      },
+    });
+  } catch (error) {}
+  return true;
+})()`;
+    }
+
+    /** Take one pending guest clipboard write, if any. */
+    function takeClipboardWriteScript() {
+      return `(() => {
+  const pending = window.__dshClipboardWriteRequest;
+  if (pending === null || pending === undefined) return JSON.stringify(null);
+  window.__dshClipboardWriteRequest = null;
+  return JSON.stringify({ text: String(pending.text ?? '') });
+})()`;
+    }
+
     /** DSH sessions whose user chose "allow everything for this session". */
     const allowedAskSessions = new Set();
     /** The mounted panel publishes its ask/read handlers here while its guest is ready. */
@@ -365,6 +461,32 @@ window.__ModuleLoader__.load({
       if (typeof raw !== 'string') return null;
       try {
         return JSON.parse(raw);
+      } catch (error) {
+        return null;
+      }
+    }
+
+    /** Write text to the system clipboard through the Host bridge. */
+    async function writeSystemClipboard(text) {
+      const response = await fetch(BRIDGE_CLIPBOARD_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'write', text: String(text) }),
+      });
+      return response.ok;
+    }
+
+    /** Read the system clipboard through the Host bridge; null when unavailable. */
+    async function readSystemClipboard() {
+      const response = await fetch(BRIDGE_CLIPBOARD_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'read' }),
+      });
+      if (!response.ok) return null;
+      try {
+        const data = await response.json();
+        return data !== null && typeof data === 'object' && typeof data.text === 'string' ? data.text : null;
       } catch (error) {
         return null;
       }
@@ -612,6 +734,15 @@ window.__ModuleLoader__.load({
           const [ask, setAsk] = React.useState(null);
           const askBarRef = React.useRef(null);
           const [askGeometry, setAskGeometry] = React.useState(null);
+          const viewRef = React.useRef(null);
+          const notifyTimer = React.useRef(undefined);
+          const notify = (text) => {
+            setNotice(text);
+            window.clearTimeout(notifyTimer.current);
+            notifyTimer.current = window.setTimeout(() => {
+              setNotice(null);
+            }, 4000);
+          };
 
           React.useEffect(() => {
             const stageElement = stage.current;
@@ -633,6 +764,7 @@ window.__ModuleLoader__.load({
             let syncing = false;
             let timer;
             let poll;
+            let clipboardPoller;
             let pendingFill = null;
             let noticeTimer;
             let askPlacement = null;
@@ -777,6 +909,25 @@ window.__ModuleLoader__.load({
               }
             };
 
+            const installClipboardBridge = () => {
+              if (element === undefined) return;
+              void element.executeJavaScript(clipboardBridgeScript(), false).catch((error) => {
+                console.warn('[deepseek-webchat] could not install the clipboard bridge', error);
+              });
+            };
+
+            const drainClipboardWrites = async () => {
+              if (disposed || !ready || element === undefined) return;
+              try {
+                const raw = parseScriptValue(await element.executeJavaScript(takeClipboardWriteScript(), false));
+                if (raw !== null && typeof raw === 'object' && typeof raw.text === 'string' && raw.text.length > 0) {
+                  await writeSystemClipboard(raw.text);
+                }
+              } catch (error) {
+                console.warn('[deepseek-webchat] clipboard drain failed', error);
+              }
+            };
+
             const finish = () => {
               if (disposed || ready) return;
               ready = true;
@@ -785,6 +936,7 @@ window.__ModuleLoader__.load({
               window.clearTimeout(timer);
               setStatus('ready');
               flushFill();
+              installClipboardBridge();
             };
 
             const flushFill = () => {
@@ -910,6 +1062,7 @@ window.__ModuleLoader__.load({
                 finish();
               } finally {
                 syncing = false;
+                installClipboardBridge();
               }
             };
 
@@ -935,6 +1088,7 @@ window.__ModuleLoader__.load({
                 lease = reservation.lease;
                 const view = document.createElement('webview');
                 element = view;
+                viewRef.current = view;
                 view.className = 'dsw-deepseek-webchat-webview';
                 view.setAttribute('name', reservation.lease);
                 view.setAttribute('partition', reservation.partition);
@@ -969,6 +1123,9 @@ window.__ModuleLoader__.load({
                 poll = window.setInterval(() => {
                   void syncQuietly();
                 }, 8000);
+                clipboardPoller = window.setInterval(() => {
+                  void drainClipboardWrites();
+                }, 800);
                 stageElement.appendChild(view);
               } catch (error) {
                 console.warn('[deepseek-webchat] cannot start the desktop browser guest', error);
@@ -984,6 +1141,10 @@ window.__ModuleLoader__.load({
               if (panelApi.read === readWebChat) panelApi.read = null;
               window.clearTimeout(timer);
               window.clearTimeout(noticeTimer);
+              window.clearTimeout(notifyTimer.current);
+              window.clearInterval(poll);
+              window.clearInterval(clipboardPoller);
+              viewRef.current = null;
               window.clearTimeout(approvalTimer.current);
               const resolveAsk = askResolver.current;
               askResolver.current = null;
@@ -1053,6 +1214,40 @@ window.__ModuleLoader__.load({
             resolve(verdict);
           };
 
+          const copySelection = async () => {
+            const view = viewRef.current;
+            if (view === null) return;
+            try {
+              const raw = parseScriptValue(await view.executeJavaScript(selectionScript(), false));
+              const text = typeof raw === 'string' ? raw : '';
+              if (text.length === 0) {
+                notify(copy('clipboard.empty'));
+                return;
+              }
+              notify(await writeSystemClipboard(text) ? copy('clipboard.copied') : copy('clipboard.failed'));
+            } catch (error) {
+              console.warn('[deepseek-webchat] copy failed', error);
+              notify(copy('clipboard.failed'));
+            }
+          };
+
+          const pasteClipboard = async () => {
+            const view = viewRef.current;
+            if (view === null) return;
+            try {
+              const text = await readSystemClipboard();
+              if (text === null) {
+                notify(copy('clipboard.failed'));
+                return;
+              }
+              const written = await view.executeJavaScript(fillComposerScript(text), false);
+              notify(written === true ? copy('clipboard.pasted') : copy('clipboard.noComposer'));
+            } catch (error) {
+              console.warn('[deepseek-webchat] paste failed', error);
+              notify(copy('clipboard.failed'));
+            }
+          };
+
           let askBar = null;
           if (ask !== null) {
             const placement = askGeometry !== null ? askGeometry : ask.placement;
@@ -1080,6 +1275,9 @@ window.__ModuleLoader__.load({
           }
 
           return h('div', { className: 'dsw-deepseek-webchat-panel' },
+            h('div', { className: 'dsw-deepseek-webchat-toolbar' },
+              h('button', { type: 'button', className: 'dsw-deepseek-webchat-tool', onClick: copySelection }, copy('clipboard.copy')),
+              h('button', { type: 'button', className: 'dsw-deepseek-webchat-tool', onClick: pasteClipboard }, copy('clipboard.paste'))),
             h('div', { className: 'dsw-deepseek-webchat-stage', ref: stage }),
             overlay,
             notice === null ? null : h('div', { className: 'dsw-deepseek-webchat-notice' }, notice),

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -9,6 +10,7 @@ import { readFileSync } from 'node:fs';
  */
 const POLL_PATH = '/dsh-deepseek-webchat/poll';
 const RESULT_PATH = '/dsh-deepseek-webchat/result';
+const CLIPBOARD_PATH = '/dsh-deepseek-webchat/clipboard';
 const ASK_TIMEOUT_MS = 180000;
 const READ_TIMEOUT_MS = 90000;
 const COMMAND_TTL_MS = 150000;
@@ -16,6 +18,7 @@ const MAX_PROMPT_CHARS = 20000;
 const MAX_READ_CHARS = 60000;
 const MAX_READ_MESSAGES = 200;
 const MAX_BODY_BYTES = 131072;
+const MAX_CLIPBOARD_CHARS = 200000;
 const SKILL_NAME = 'deepseek-web-ask';
 
 const SKILL_PATH = new URL('./skills/deepseek-web-ask/SKILL.md', import.meta.url);
@@ -80,6 +83,46 @@ export function apply(ctx) {
     }
     return Buffer.concat(chunks).toString('utf8');
   };
+
+  /**
+   * The embedded guest session denies every permission, including the Clipboard
+   * API, so the page's own copy buttons cannot reach the system clipboard. Bridge
+   * reads/writes through the Host process's platform clipboard commands instead.
+   * shortcut: Linux assumes wl-clipboard is installed; fall back to xclip if needed.
+   */
+  const clipboardCommands = () => {
+    if (process.platform === 'darwin') return { read: ['pbpaste', []], write: ['pbcopy', []] };
+    if (process.platform === 'win32') {
+      return {
+        read: ['powershell', ['-NoProfile', '-Command', 'Get-Clipboard -Raw']],
+        write: ['powershell', ['-NoProfile', '-Command', '[Console]::In.ReadToEnd() | Set-Clipboard']],
+      };
+    }
+    return { read: ['wl-paste', ['-n']], write: ['wl-copy', []] };
+  };
+
+  const readClipboard = () => new Promise((resolve, reject) => {
+    const command = clipboardCommands();
+    execFile(command.read[0], command.read[1], { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(typeof stdout === 'string' ? stdout : String(stdout));
+    });
+  });
+
+  const writeClipboard = (text) => new Promise((resolve, reject) => {
+    const command = clipboardCommands();
+    const child = spawn(command.write[0], command.write[1], { stdio: ['pipe', 'ignore', 'ignore'] });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error('clipboard write exited with ' + String(code)));
+    });
+    child.stdin.on('error', reject);
+    child.stdin.end(text);
+  });
 
   /**
    * Queue one command for the Client half, wait for its result, and settle on
@@ -310,12 +353,55 @@ export function apply(ctx) {
     },
   };
 
+  const clipboardRoute = {
+    kind: 'exact',
+    path: CLIPBOARD_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        json(res, 405, { error: 'method' });
+        return;
+      }
+      if (!authorized(req)) {
+        json(res, 401, { error: 'unauthorized' });
+        return;
+      }
+      let body;
+      try {
+        body = JSON.parse(await readBody(req));
+      } catch (error) {
+        json(res, 400, { error: 'body' });
+        return;
+      }
+      if (body === null || typeof body !== 'object') {
+        json(res, 400, { error: 'body' });
+        return;
+      }
+      try {
+        if (body.action === 'read') {
+          json(res, 200, { ok: true, text: await readClipboard() });
+          return;
+        }
+        if (body.action === 'write' && typeof body.text === 'string' && body.text.length <= MAX_CLIPBOARD_CHARS) {
+          await writeClipboard(body.text);
+          json(res, 200, { ok: true });
+          return;
+        }
+        json(res, 400, { error: 'action' });
+      } catch (error) {
+        console.warn('[deepseek-webchat] clipboard command failed', error);
+        json(res, 503, { error: 'clipboard-unavailable' });
+      }
+    },
+  };
+
   ctx.effect(() => {
     const removePoll = ctx.webServer.register(pollRoute);
     const removeResult = ctx.webServer.register(resultRoute);
+    const removeClipboard = ctx.webServer.register(clipboardRoute);
     return () => {
       removePoll();
       removeResult();
+      removeClipboard();
     };
   }, 'deepseek-webchat: bridge routes');
 
