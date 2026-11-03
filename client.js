@@ -124,9 +124,9 @@ window.__ModuleLoader__.load({
       '.dsw-deepseek-webchat-send:disabled{color:var(--dsw-alias-label-quaternary);cursor:default}',
       '.dsw-deepseek-webchat-send:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}',
       '.dsw-deepseek-webchat-notice{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);max-width:min(80%,560px);padding:6px 14px;border-radius:999px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);box-shadow:0 4px 16px rgb(0 0 0 / 12%);pointer-events:none}',
-      '.dsw-deepseek-webchat-ask{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:8px;padding:12px 16px;background:var(--dsw-alias-bg-overlay);border-top:0.5px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);box-shadow:0 -4px 16px rgb(0 0 0 / 10%)}',
+      '.dsw-deepseek-webchat-ask{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:8px;padding:10px 14px;background:var(--dsw-alias-bg-overlay);border:0.5px solid var(--dsw-alias-border-l1);border-radius:10px;color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);box-shadow:0 8px 24px rgb(0 0 0 / 16%)}',
       '.dsw-deepseek-webchat-ask-title{font-weight:600}',
-      '.dsw-deepseek-webchat-ask-prompt{max-height:96px;overflow:auto;white-space:pre-wrap;color:var(--dsw-alias-label-secondary)}',
+      '.dsw-deepseek-webchat-ask-prompt{max-height:72px;overflow:auto;white-space:pre-wrap;color:var(--dsw-alias-label-secondary)}',
       '.dsw-deepseek-webchat-ask-actions{display:flex;gap:8px;justify-content:flex-end}',
       '.dsw-deepseek-webchat-picker{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:rgb(0 0 0 / 32%)}',
       '.dsw-deepseek-webchat-picker-panel{display:flex;flex-direction:column;width:min(680px,92vw);max-height:min(72vh,600px);border-radius:12px;overflow:hidden;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 16px 48px rgb(0 0 0 / 24%)}',
@@ -322,6 +322,35 @@ window.__ModuleLoader__.load({
     totalMessages,
     truncated,
   });
+})()`;
+    }
+
+    /** Measure the web composer so the approval bar can sit right below it. */
+    function composerRectScript() {
+      return `(() => {
+  const textarea = document.querySelector('textarea[placeholder*="DeepSeek"]') || document.querySelector('textarea');
+  if (textarea === null) return JSON.stringify(null);
+  const rects = [];
+  const collect = (node) => {
+    if (node === null || typeof node.getBoundingClientRect !== 'function') return;
+    const rect = node.getBoundingClientRect();
+    if (rect.width > 0 || rect.height > 0) rects.push(rect);
+  };
+  collect(textarea);
+  collect(document.querySelector('div.ds-button--primary'));
+  collect(document.querySelector('button[type="submit"]'));
+  let left = Infinity;
+  let right = -Infinity;
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const rect of rects) {
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+    top = Math.min(top, rect.top);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+  if (!Number.isFinite(left)) return JSON.stringify(null);
+  return JSON.stringify({ left, right, top, bottom, width: right - left, height: bottom - top });
 })()`;
     }
 
@@ -604,6 +633,7 @@ window.__ModuleLoader__.load({
             let poll;
             let pendingFill = null;
             let noticeTimer;
+            let askPlacement = null;
             const lifetime = new AbortController();
             setStatus('loading');
 
@@ -616,17 +646,46 @@ window.__ModuleLoader__.load({
               }, 4000);
             };
 
-            /** Wait for the user's verdict on one agent question; deny on timeout/unmount. */
-            const askApproval = (prompt, sessionId) => new Promise((resolve) => {
-              askResolver.current = resolve;
-              setAsk({ phase: 'approval', prompt, allowAlways: typeof sessionId === 'string' && sessionId.length > 0 });
-              window.clearTimeout(approvalTimer.current);
-              approvalTimer.current = window.setTimeout(() => {
-                if (askResolver.current !== resolve) return;
-                askResolver.current = null;
-                resolve('timeout');
-              }, 90000);
-            });
+            /**
+             * Measure the web composer, then wait for the user's verdict on one agent
+             * question. The bar sits just below the composer when there is room and above
+             * it otherwise, so it never covers the page bottom; deny on timeout/unmount.
+             */
+            const askApproval = async (prompt, sessionId) => {
+              askPlacement = null;
+              try {
+                if (element !== undefined) {
+                  const rect = parseScriptValue(await element.executeJavaScript(composerRectScript(), false));
+                  if (rect !== null && typeof rect === 'object'
+                    && typeof rect.bottom === 'number' && typeof rect.top === 'number'
+                    && typeof rect.left === 'number' && typeof rect.width === 'number') {
+                    const panelWidth = stageElement.clientWidth;
+                    const panelHeight = stageElement.clientHeight;
+                    const width = Math.max(220, Math.min(rect.width, panelWidth - 16));
+                    const left = Math.max(8, Math.min(rect.left, panelWidth - width - 8));
+                    const below = rect.bottom + 10;
+                    const above = rect.top - 10 - 140;
+                    askPlacement = {
+                      top: below + 140 <= panelHeight - 8 ? below : Math.max(8, above),
+                      left,
+                      width,
+                    };
+                  }
+                }
+              } catch (error) {
+                console.warn('[deepseek-webchat] could not measure the composer', error);
+              }
+              return new Promise((resolve) => {
+                askResolver.current = resolve;
+                setAsk({ phase: 'approval', prompt, placement: askPlacement, allowAlways: typeof sessionId === 'string' && sessionId.length > 0 });
+                window.clearTimeout(approvalTimer.current);
+                approvalTimer.current = window.setTimeout(() => {
+                  if (askResolver.current !== resolve) return;
+                  askResolver.current = null;
+                  resolve('timeout');
+                }, 90000);
+              });
+            };
 
             /**
              * Answer one agent question through the guest page: fill the (empty) composer,
@@ -645,7 +704,7 @@ window.__ModuleLoader__.load({
                 setAsk(null);
                 return { ok: false, error: 'denied' };
               }
-              setAsk({ phase: 'sending', prompt });
+              setAsk({ phase: 'sending', prompt, placement: askPlacement });
               try {
                 const fill = parseScriptValue(await element.executeJavaScript(askFillScript(prompt), false));
                 if (fill === null || fill.ok !== true) {
@@ -662,7 +721,7 @@ window.__ModuleLoader__.load({
                   await element.executeJavaScript(askSendScript(), false);
                   await delay(1200);
                 }
-                if (!disposed) setAsk({ phase: 'waiting', prompt });
+                if (!disposed) setAsk({ phase: 'waiting', prompt, placement: askPlacement });
                 const deadline = Date.now() + ASK_WAIT_MS;
                 let last = '';
                 let stable = 0;
@@ -965,7 +1024,16 @@ window.__ModuleLoader__.load({
 
           let askBar = null;
           if (ask !== null) {
-            askBar = h('div', { className: 'dsw-deepseek-webchat-ask' },
+            const placement = ask.placement;
+            const askStyle = placement === null || placement === undefined ? undefined : {
+              top: placement.top + 'px',
+              left: placement.left + 'px',
+              width: placement.width + 'px',
+              right: 'auto',
+              bottom: 'auto',
+              transform: 'none',
+            };
+            askBar = h('div', { className: 'dsw-deepseek-webchat-ask', style: askStyle },
               h('div', { className: 'dsw-deepseek-webchat-ask-title' }, copy('ask.title')),
               ask.phase === 'approval'
                 ? h('div', { className: 'dsw-deepseek-webchat-ask-prompt' }, ask.prompt)
