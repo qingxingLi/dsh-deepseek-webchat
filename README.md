@@ -41,7 +41,7 @@ dsh plugin --profile desktop add "link:/absolute/path/to/dsh-deepseek-webchat"
 对 DSH 说类似：
 
 ```
-问一下网页版：OEC 如何刷机飞牛及体验如何？
+问一下网页版：<你的问题>
 让 DeepSeek 网页版回答一下：……
 用网页版做三轮追问：先问 A，再根据回答问 B 和 C
 ```
