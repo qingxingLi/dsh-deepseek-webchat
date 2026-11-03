@@ -610,6 +610,8 @@ window.__ModuleLoader__.load({
           const [attempt, setAttempt] = React.useState(0);
           const [notice, setNotice] = React.useState(null);
           const [ask, setAsk] = React.useState(null);
+          const askBarRef = React.useRef(null);
+          const [askGeometry, setAskGeometry] = React.useState(null);
 
           React.useEffect(() => {
             const stageElement = stage.current;
@@ -664,11 +666,11 @@ window.__ModuleLoader__.load({
                     const width = Math.max(220, Math.min(rect.width, panelWidth - 16));
                     const left = Math.max(8, Math.min(rect.left, panelWidth - width - 8));
                     const below = rect.bottom + 10;
-                    const above = rect.top - 10 - 140;
                     askPlacement = {
-                      top: below + 140 <= panelHeight - 8 ? below : Math.max(8, above),
+                      top: below + 120 <= panelHeight - 8 ? below : Math.max(8, rect.top - 10 - 120),
                       left,
                       width,
+                      anchor: { top: rect.top, bottom: rect.bottom, left, width },
                     };
                   }
                 }
@@ -992,6 +994,35 @@ window.__ModuleLoader__.load({
             };
           }, [attempt]);
 
+          /**
+           * Refine the approval bar placement with its measured height: just below the
+           * web composer when it fits, otherwise just above it.
+           */
+          React.useLayoutEffect(() => {
+            if (ask === null) {
+              if (askGeometry !== null) setAskGeometry(null);
+              return;
+            }
+            const placement = ask.placement;
+            const anchor = placement !== null && placement !== undefined ? placement.anchor : undefined;
+            const bar = askBarRef.current;
+            if (anchor === undefined || bar === null) return;
+            const panel = bar.parentElement;
+            const panelHeight = panel !== null ? panel.clientHeight : window.innerHeight;
+            const height = bar.offsetHeight;
+            const below = anchor.bottom + 10;
+            const next = {
+              top: below + height <= panelHeight - 8 ? below : Math.max(8, anchor.top - 10 - height),
+              left: anchor.left,
+              width: anchor.width,
+            };
+            if (askGeometry !== null
+              && Math.abs(askGeometry.top - next.top) < 1
+              && Math.abs(askGeometry.left - next.left) < 1
+              && Math.abs(askGeometry.width - next.width) < 1) return;
+            setAskGeometry(next);
+          }, [ask, askGeometry]);
+
           const openExternal = () => {
             window.open(CHAT_URL, '_blank', 'noopener');
           };
@@ -1024,7 +1055,7 @@ window.__ModuleLoader__.load({
 
           let askBar = null;
           if (ask !== null) {
-            const placement = ask.placement;
+            const placement = askGeometry !== null ? askGeometry : ask.placement;
             const askStyle = placement === null || placement === undefined ? undefined : {
               top: placement.top + 'px',
               left: placement.left + 'px',
@@ -1033,7 +1064,7 @@ window.__ModuleLoader__.load({
               bottom: 'auto',
               transform: 'none',
             };
-            askBar = h('div', { className: 'dsw-deepseek-webchat-ask', style: askStyle },
+            askBar = h('div', { className: 'dsw-deepseek-webchat-ask', style: askStyle, ref: askBarRef },
               h('div', { className: 'dsw-deepseek-webchat-ask-title' }, copy('ask.title')),
               ask.phase === 'approval'
                 ? h('div', { className: 'dsw-deepseek-webchat-ask-prompt' }, ask.prompt)
