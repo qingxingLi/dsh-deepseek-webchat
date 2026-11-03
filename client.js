@@ -421,6 +421,38 @@ window.__ModuleLoader__.load({
 })()`;
     }
 
+    /**
+     * Force the guest page's own dark styling to match the DSH theme. DeepSeek
+     * switches dark mode through body.dark + body[data-ds-dark-theme]; re-apply on
+     * DOM mutations so its own theme effect cannot revert us.
+     */
+    function themeScript(dark) {
+      return `(() => {
+  const desired = ${dark === true ? 'true' : 'false'};
+  const apply = () => {
+    const body = document.body;
+    if (body === null || body.classList === undefined) return;
+    if (body.classList.contains('dark') !== desired) body.classList.toggle('dark', desired);
+    if (desired) {
+      if (body.dataset.dsDarkTheme !== 'dark') body.dataset.dsDarkTheme = 'dark';
+    } else if (body.dataset.dsDarkTheme !== undefined) {
+      delete body.dataset.dsDarkTheme;
+    }
+    const root = document.documentElement;
+    if (root !== null && root.style !== undefined) root.style.colorScheme = desired ? 'dark' : 'light';
+  };
+  window.__dshThemeDesired = desired;
+  apply();
+  if (window.__dshThemeObserver === undefined && document.body !== null && typeof MutationObserver === 'function') {
+    window.__dshThemeObserver = new MutationObserver(() => {
+      if (window.__dshThemeDesired !== undefined) apply();
+    });
+    window.__dshThemeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-ds-dark-theme'] });
+  }
+  return true;
+})()`;
+    }
+
     /** DSH sessions whose user chose "allow everything for this session". */
     const allowedAskSessions = new Set();
     /** The mounted panel publishes its ask/read handlers here while its guest is ready. */
@@ -653,7 +685,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale', 'layout'],
+      inject: ['slots', 'locale', 'layout', 'theme'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'deepseek-webchat: dictionaries');
 
@@ -874,6 +906,20 @@ window.__ModuleLoader__.load({
               }
             };
 
+            const applyGuestTheme = () => {
+              if (element === undefined) return;
+              const snapshot = ctx.theme !== undefined && typeof ctx.theme.getTheme === 'function' ? ctx.theme.getTheme() : null;
+              const active = snapshot !== null && snapshot.active !== null && typeof snapshot.active === 'object' ? snapshot.active : null;
+              const scheme = active !== null ? active.colorScheme : null;
+              if (scheme !== 'dark' && scheme !== 'light') return;
+              void element.executeJavaScript(themeScript(scheme === 'dark'), false).catch((error) => {
+                console.warn('[deepseek-webchat] could not apply the DSH theme', error);
+              });
+            };
+            const disposeTheme = typeof ctx.on === 'function' ? ctx.on('theme/change', () => {
+              applyGuestTheme();
+            }) : undefined;
+
             const finish = () => {
               if (disposed || ready) return;
               ready = true;
@@ -883,6 +929,7 @@ window.__ModuleLoader__.load({
               setStatus('ready');
               flushFill();
               installClipboardBridge();
+              applyGuestTheme();
             };
 
             const flushFill = () => {
@@ -1009,6 +1056,7 @@ window.__ModuleLoader__.load({
               } finally {
                 syncing = false;
                 installClipboardBridge();
+                applyGuestTheme();
               }
             };
 
@@ -1088,6 +1136,7 @@ window.__ModuleLoader__.load({
               window.clearTimeout(noticeTimer);
               window.clearInterval(poll);
               window.clearInterval(clipboardPoller);
+              if (disposeTheme !== undefined) disposeTheme();
               window.clearTimeout(approvalTimer.current);
               const resolveAsk = askResolver.current;
               askResolver.current = null;
