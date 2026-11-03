@@ -56,6 +56,17 @@ window.__ModuleLoader__.load({
       'ask.sending': '正在发送到网页版…',
       'ask.waiting': '已发送，等待网页版回复…',
       'ask.always': '本会话都允许',
+      'share.title': '选择要分享到 DeepSeek 网页版的对话',
+      'share.all': '全选',
+      'share.none': '全不选',
+      'share.confirm': '发送到网页版',
+      'share.empty': '（无文本）',
+      'share.tools': '工具',
+      'transcript.toolCalls': '工具调用',
+      'transcript.toolArgs': '参数',
+      'transcript.toolResult': '结果',
+      'transcript.toolError': '失败',
+      'transcript.emptyAssistant': '（无文本，仅工具调用）',
     };
     const en = {
       'panel.label': 'DeepSeek Web',
@@ -83,6 +94,17 @@ window.__ModuleLoader__.load({
       'ask.sending': 'Sending to the web chat…',
       'ask.waiting': 'Sent; waiting for the web chat reply…',
       'ask.always': 'Allow for this session',
+      'share.title': 'Choose the conversation to share with DeepSeek web chat',
+      'share.all': 'Select all',
+      'share.none': 'Select none',
+      'share.confirm': 'Send to web chat',
+      'share.empty': '(no text)',
+      'share.tools': 'Tools',
+      'transcript.toolCalls': 'Tool calls',
+      'transcript.toolArgs': 'args',
+      'transcript.toolResult': 'result',
+      'transcript.toolError': 'failed',
+      'transcript.emptyAssistant': '(no text; tool calls only)',
     };
 
     const CSS = [
@@ -106,6 +128,17 @@ window.__ModuleLoader__.load({
       '.dsw-deepseek-webchat-ask-title{font-weight:600}',
       '.dsw-deepseek-webchat-ask-prompt{max-height:96px;overflow:auto;white-space:pre-wrap;color:var(--dsw-alias-label-secondary)}',
       '.dsw-deepseek-webchat-ask-actions{display:flex;gap:8px;justify-content:flex-end}',
+      '.dsw-deepseek-webchat-picker{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:rgb(0 0 0 / 32%)}',
+      '.dsw-deepseek-webchat-picker-panel{display:flex;flex-direction:column;width:min(680px,92vw);max-height:min(72vh,600px);border-radius:12px;overflow:hidden;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);box-shadow:0 16px 48px rgb(0 0 0 / 24%)}',
+      '.dsw-deepseek-webchat-picker-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 16px;border-bottom:0.5px solid var(--dsw-alias-border-l3);font:var(--dsw-font-xs-13);font-weight:600;color:var(--dsw-alias-label-primary)}',
+      '.dsw-deepseek-webchat-picker-list{flex:1 1 auto;min-height:0;overflow:auto;padding:6px 8px}',
+      '.dsw-deepseek-webchat-picker-row{display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:8px;cursor:pointer;font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary)}',
+      '.dsw-deepseek-webchat-picker-row:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))}',
+      '.dsw-deepseek-webchat-picker-row input{margin:2px 0 0;flex:none;accent-color:var(--dsw-alias-brand-primary)}',
+      '.dsw-deepseek-webchat-picker-role{flex:none;min-width:44px;color:var(--dsw-alias-label-primary)}',
+      '.dsw-deepseek-webchat-picker-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dsw-deepseek-webchat-picker-tools{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xxxs-11)}',
+      '.dsw-deepseek-webchat-picker-actions{display:flex;gap:8px;justify-content:flex-end;padding:10px 16px;border-top:0.5px solid var(--dsw-alias-border-l3)}',
     ].join('');
 
     const ICON_PATH = 'M6.2 4h11.6A2.2 2.2 0 0 1 20 6.2v7.6a2.2 2.2 0 0 1-2.2 2.2H9.8L5 19.5V16h1.2A2.2 2.2 0 0 1 4 13.8V6.2A2.2 2.2 0 0 1 6.2 4Z';
@@ -352,8 +385,47 @@ window.__ModuleLoader__.load({
       return parts.join('').trim();
     }
 
-    /** Walk the Chat projection in display order and collect the human-visible messages. */
-    function collectTranscript(order, nodes) {
+    /** Newline constant keeps generated Markdown free of source-level escapes. */
+    const NL = String.fromCharCode(10);
+
+    /** Join one wire content block list into plain text. */
+    function textOfContentBlocks(content) {
+      if (!Array.isArray(content)) return '';
+      const parts = [];
+      for (const block of content) {
+        if (block !== null && typeof block === 'object' && typeof block.text === 'string') parts.push(block.text);
+      }
+      return parts.join('').trim();
+    }
+
+    /** Collapse one value to a single truncated line for previews and Markdown hints. */
+    function clipLine(text, max) {
+      const value = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+      return value.length > max ? value.slice(0, max) + '…' : value;
+    }
+
+    /** Expand one Chat tool-call node into a compact report for the shared transcript. */
+    function toolInfoOf(data) {
+      const root = data !== null && typeof data === 'object' ? data.root : undefined;
+      if (root === null || typeof root !== 'object') return null;
+      const call = root.call !== null && typeof root.call === 'object' ? root.call : undefined;
+      const name = typeof root.name === 'string' && root.name.length > 0
+        ? root.name
+        : (call !== undefined && typeof call.name === 'string' ? call.name : '');
+      if (name.length === 0) return null;
+      const argsRaw = typeof root.argsRaw === 'string' && root.argsRaw.length > 0
+        ? root.argsRaw
+        : (call !== undefined && typeof call.argsRaw === 'string' ? call.argsRaw : '');
+      const resultText = root.kind === 'tool-result' ? textOfContentBlocks(root.content) : '';
+      const isError = root.kind === 'tool-result' && root.isError === true;
+      const error = root.error !== null && typeof root.error === 'object'
+        ? (typeof root.error.name === 'string' ? root.error.name : (typeof root.error.code === 'string' ? root.error.code : ''))
+        : '';
+      return { name, argsRaw, resultText, isError, error };
+    }
+
+    /** Walk the Chat projection and collect selectable messages with their tool calls. */
+    function collectMessages(order, nodes) {
       const messages = [];
       if (!Array.isArray(order) || nodes === null || typeof nodes !== 'object') return messages;
       const get = typeof nodes.get === 'function' ? (key) => nodes.get(key) : (key) => nodes[key];
@@ -362,25 +434,46 @@ window.__ModuleLoader__.load({
         if (node === null || typeof node !== 'object' || node.data === null || typeof node.data !== 'object') continue;
         if (node.kind === 'user' || node.kind === 'steering') {
           const text = textOfUserContent(node.data.content);
-          if (text !== '') messages.push({ role: node.kind === 'steering' ? 'steering' : 'user', text });
+          if (text !== '') messages.push({ key, role: node.kind === 'steering' ? 'steering' : 'user', text, tools: [] });
         } else if (node.kind === 'assistant-step') {
           const text = textOfAssistantBlocks(node.data.blocks);
-          if (text !== '') messages.push({ role: 'assistant', text });
+          if (text !== '') messages.push({ key, role: 'assistant', text, tools: [] });
+        } else if (node.kind === 'tool-call') {
+          const tool = toolInfoOf(node.data);
+          if (tool === null) continue;
+          const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
+          if (last !== undefined && last.role === 'assistant') last.tools.push(tool);
+          else messages.push({ key, role: 'assistant', text: '', tools: [tool] });
         }
       }
       return messages.slice(-TRANSCRIPT_MAX_MESSAGES);
     }
 
-    /** Render the collected messages as Markdown for the web chat composer. */
+    /** Render the selected messages as Markdown, including the tools the agent used. */
     function buildTranscript(messages, labels) {
-      const body = messages.map((message) => {
+      const blocks = [];
+      for (const message of messages) {
         const heading = message.role === 'user' ? labels.user : message.role === 'steering' ? labels.steering : labels.assistant;
-        return '## ' + heading + '\n\n' + message.text;
-      }).join('\n\n');
+        const body = message.text !== '' ? message.text : labels.emptyAssistant;
+        const lines = ['## ' + heading, '', body];
+        if (message.tools.length > 0) {
+          lines.push('', '**' + labels.toolCalls + '**');
+          for (const tool of message.tools) {
+            const args = clipLine(tool.argsRaw, 400);
+            const result = clipLine(tool.resultText, 600);
+            const status = tool.isError ? ' [' + labels.toolError + (tool.error !== '' ? ': ' + tool.error : '') + ']' : '';
+            lines.push('- `' + tool.name + '`' + status);
+            if (args !== '') lines.push('  - ' + labels.toolArgs + ': `' + args + '`');
+            if (result !== '') lines.push('  - ' + labels.toolResult + ': ' + result);
+          }
+        }
+        blocks.push(lines.join(NL));
+      }
+      const body = blocks.join(NL + NL);
       const clipped = body.length > TRANSCRIPT_MAX_CHARS
-        ? labels.truncated + '\n\n' + body.slice(-TRANSCRIPT_MAX_CHARS)
+        ? labels.truncated + NL + NL + body.slice(-TRANSCRIPT_MAX_CHARS)
         : body;
-      return ['# ' + labels.title, '', '> ' + labels.note, '', clipped, ''].join('\n');
+      return ['# ' + labels.title, '', '> ' + labels.note, '', clipped, ''].join(NL);
     }
 
     /** Sidebar row glyph; the sidebar owns the button and asks for a square edge. */
@@ -829,9 +922,9 @@ window.__ModuleLoader__.load({
         }
 
         /**
-         * Session-scoped composer action: read the Chat projection, render the visible
-         * transcript as Markdown, and hand it to the web-chat panel (which opens and
-         * fills its composer). Nothing is sent to DeepSeek automatically.
+         * Session-scoped composer action: let the user pick which previous messages to
+         * share, then hand a Markdown rendering (including the tools the agent used) to
+         * the web-chat panel. Nothing is sent to DeepSeek automatically.
          */
         function SendToWebChat(props) {
           const sessionId = props.sessionId;
@@ -840,28 +933,76 @@ window.__ModuleLoader__.load({
           const order = useChat((snapshot) => snapshot.order);
           const nodes = useChat((snapshot) => snapshot.nodes);
           const title = useSessions((snapshot) => snapshot.byId[sessionId]?.title);
-          const messages = React.useMemo(() => collectTranscript(order, nodes), [order, nodes]);
-          const disabled = messages.length === 0;
-          const send = () => {
+          const messages = React.useMemo(() => collectMessages(order, nodes), [order, nodes]);
+          const [selecting, setSelecting] = React.useState(false);
+          const [selected, setSelected] = React.useState([]);
+
+          const transcriptLabels = () => {
             const sessionTitle = typeof title === 'string' && title.length > 0 ? title : copy('transcript.untitled');
-            requestFill(buildTranscript(messages, {
+            return {
               title: copy('transcript.title') + ' · ' + sessionTitle,
               note: copy('transcript.note'),
               user: copy('transcript.user'),
               assistant: copy('transcript.assistant'),
               steering: copy('transcript.steering'),
               truncated: copy('transcript.truncated'),
-            }));
+              toolCalls: copy('transcript.toolCalls'),
+              toolArgs: copy('transcript.toolArgs'),
+              toolResult: copy('transcript.toolResult'),
+              toolError: copy('transcript.toolError'),
+              emptyAssistant: copy('transcript.emptyAssistant'),
+            };
+          };
+
+          const openPicker = () => {
+            if (messages.length === 0) return;
+            setSelected(messages.map((message) => message.key));
+            setSelecting(true);
+          };
+          const toggle = (key) => setSelected((current) => (
+            current.includes(key) ? current.filter((value) => value !== key) : [...current, key]
+          ));
+          const confirm = () => {
+            const chosen = messages.filter((message) => selected.includes(message.key));
+            if (chosen.length === 0) return;
+            requestFill(buildTranscript(chosen, transcriptLabels()));
+            setSelecting(false);
             ctx.layout.selectPanel(PANEL_ID);
           };
-          return h('button', {
-            type: 'button',
-            className: 'dsw-deepseek-webchat-send',
-            title: copy('action.send'),
-            'aria-label': copy('action.send'),
-            disabled,
-            onClick: send,
-          }, SendIcon());
+
+          const rows = messages.map((message) => {
+            const role = message.role === 'user' ? copy('transcript.user') : message.role === 'steering' ? copy('transcript.steering') : copy('transcript.assistant');
+            const preview = clipLine(message.text, 120);
+            const toolNames = message.tools.map((tool) => tool.name).join('、');
+            return h('label', { key: message.key, className: 'dsw-deepseek-webchat-picker-row' },
+              h('input', { type: 'checkbox', checked: selected.includes(message.key), onChange: () => toggle(message.key) }),
+              h('span', { className: 'dsw-deepseek-webchat-picker-role' }, role),
+              h('span', { className: 'dsw-deepseek-webchat-picker-text' }, preview !== '' ? preview : copy('share.empty')),
+              toolNames !== '' ? h('span', { className: 'dsw-deepseek-webchat-picker-tools' }, copy('share.tools') + ' ' + toolNames) : null);
+          });
+
+          const picker = selecting ? h('div', { className: 'dsw-deepseek-webchat-picker' },
+            h('div', { className: 'dsw-deepseek-webchat-picker-panel' },
+              h('div', { className: 'dsw-deepseek-webchat-picker-head' },
+                h('span', null, copy('share.title') + ' · ' + String(selected.length) + '/' + String(messages.length)),
+                h('button', { type: 'button', className: 'dsw-deepseek-webchat-button', onClick: () => setSelecting(false) }, copy('ask.cancel'))),
+              h('div', { className: 'dsw-deepseek-webchat-picker-list' }, rows),
+              h('div', { className: 'dsw-deepseek-webchat-picker-actions' },
+                h('button', { type: 'button', className: 'dsw-deepseek-webchat-button', onClick: () => setSelected(messages.map((message) => message.key)) }, copy('share.all')),
+                h('button', { type: 'button', className: 'dsw-deepseek-webchat-button', onClick: () => setSelected([]) }, copy('share.none')),
+                h('button', { type: 'button', className: 'dsw-deepseek-webchat-button', disabled: selected.length === 0, onClick: confirm }, copy('share.confirm') + ' (' + String(selected.length) + ')')))
+            ) : null;
+
+          return h(React.Fragment, null,
+            h('button', {
+              type: 'button',
+              className: 'dsw-deepseek-webchat-send',
+              title: copy('action.send'),
+              'aria-label': copy('action.send'),
+              disabled: messages.length === 0,
+              onClick: openPicker,
+            }, SendIcon()),
+            picker);
         }
 
         /** Open the panel if needed, wait until its guest is ready, then run the question. */
