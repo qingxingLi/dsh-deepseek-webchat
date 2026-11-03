@@ -1,9 +1,9 @@
 {
   "name": "dsh-deepseek-webchat",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek web chat panel with restored sign-in, Chinese UI, conversation import, and a deepseek_web_ask agent tool plus its built-in skill and prompt section.",
+  "description": "DeepSeek web chat panel with restored sign-in, Chinese UI, conversation import, and the deepseek_web_ask / deepseek_web_read agent tools plus their skill and prompt section.",
   "license": "MIT",
   "repository": {
     "type": "git",

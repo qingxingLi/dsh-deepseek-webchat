@@ -286,10 +286,49 @@ window.__ModuleLoader__.load({
 })()`;
     }
 
+    /** Read the visible DeepSeek conversation from the panel DOM (no sending). */
+    function readThreadScript(maxChars, last) {
+      return `(() => {
+  const maxChars = ${JSON.stringify(maxChars)};
+  const lastCount = ${JSON.stringify(last)};
+  const nodes = Array.from(document.querySelectorAll('.ds-message'));
+  const messages = [];
+  for (const node of nodes) {
+    const answer = node.querySelector('.ds-assistant-message-main-content');
+    const role = answer !== null ? 'assistant' : 'user';
+    const source = answer !== null ? answer : node;
+    const text = String(source.innerText || '').trim();
+    if (text === '') continue;
+    messages.push({ role, text });
+  }
+  const totalMessages = messages.length;
+  const selected = lastCount > 0 ? messages.slice(-lastCount) : messages;
+  const out = [];
+  let total = 0;
+  let truncated = selected.length < totalMessages;
+  for (const message of selected) {
+    if (total >= maxChars) { truncated = true; break; }
+    const room = maxChars - total;
+    let text = message.text;
+    if (text.length > room) { text = text.slice(0, room); truncated = true; }
+    out.push({ role: message.role, text });
+    total += text.length;
+    if (text.length < message.text.length) { truncated = true; break; }
+  }
+  return JSON.stringify({
+    url: String(location.href),
+    title: String(document.title || ''),
+    messages: out,
+    totalMessages,
+    truncated,
+  });
+})()`;
+    }
+
     /** DSH sessions whose user chose "allow everything for this session". */
     const allowedAskSessions = new Set();
-    /** The mounted panel publishes its ask handler here while its guest is ready. */
-    const panelApi = { ask: null };
+    /** The mounted panel publishes its ask/read handlers here while its guest is ready. */
+    const panelApi = { ask: null, read: null };
     const delay = (ms) => new Promise((resolve) => {
       window.setTimeout(resolve, ms);
     });
@@ -652,10 +691,36 @@ window.__ModuleLoader__.load({
               }
             };
 
+            /** Read the visible web conversation for the agent; never sends anything. */
+            const readWebChat = async (maxChars, last) => {
+              if (disposed || !ready || element === undefined) return { ok: false, error: 'panel-not-ready' };
+              try {
+                const raw = parseScriptValue(await element.executeJavaScript(readThreadScript(maxChars, last), false));
+                if (raw === null) return { ok: false, error: 'read-failed' };
+                const messages = Array.isArray(raw.messages) ? raw.messages : [];
+                const transcript = messages.map((message) => (
+                  '[' + (message.role === 'assistant' ? 'assistant' : 'user') + ']' + NL + String(message.text ?? '')
+                )).join(NL + NL);
+                if (transcript.trim() === '') return { ok: false, error: 'empty-thread' };
+                return {
+                  ok: true,
+                  transcript,
+                  messageCount: typeof raw.totalMessages === 'number' ? raw.totalMessages : messages.length,
+                  truncated: raw.truncated === true,
+                  url: typeof raw.url === 'string' ? raw.url : '',
+                  title: typeof raw.title === 'string' ? raw.title : '',
+                };
+              } catch (error) {
+                console.warn('[deepseek-webchat] agent read failed', error);
+                return { ok: false, error: 'read-failed' };
+              }
+            };
+
             const finish = () => {
               if (disposed || ready) return;
               ready = true;
               panelApi.ask = askWebChat;
+              panelApi.read = readWebChat;
               window.clearTimeout(timer);
               setStatus('ready');
               flushFill();
@@ -855,6 +920,7 @@ window.__ModuleLoader__.load({
               lifetime.abort();
               fillRequests.listeners.delete(receiveFill);
               if (panelApi.ask === askWebChat) panelApi.ask = null;
+              if (panelApi.read === readWebChat) panelApi.read = null;
               window.clearTimeout(timer);
               window.clearTimeout(noticeTimer);
               window.clearTimeout(approvalTimer.current);
@@ -1021,31 +1087,44 @@ window.__ModuleLoader__.load({
           return await panelApi.ask(prompt, sessionId);
         };
 
+        /** Open the panel if needed, wait until its guest is ready, then read its visible chat. */
+        const runAgentRead = async (command) => {
+          try {
+            ctx.layout.selectPanel(PANEL_ID);
+          } catch (error) {
+            console.warn('[deepseek-webchat] could not open the panel', error);
+          }
+          const deadline = Date.now() + ASK_PANEL_WAIT_MS;
+          while (Date.now() < deadline) {
+            if (panelApi.read !== null) break;
+            await delay(300);
+          }
+          if (panelApi.read === null) return { ok: false, error: 'panel-not-ready' };
+          const maxChars = typeof command.maxChars === 'number' ? command.maxChars : 12000;
+          const last = typeof command.last === 'number' ? command.last : 0;
+          return await panelApi.read(maxChars, last);
+        };
+
         /**
-         * Agent bridge poller: the Host tool queues one question, this side picks it up,
-         * runs it through the panel, and posts the answer back. Requests are authenticated
+         * Agent bridge poller: the Host tools queue ask/read commands, this side runs
+         * them through the panel, and posts the outcome back. Requests are authenticated
          * by the Host connection, not by a plugin secret.
          */
         ctx.effect(() => {
           const bridge = globalThis.dshDesktop;
           if (bridge === undefined || bridge.protocolVersion !== 1) return undefined;
-          let asking = false;
+          let busy = false;
           let stopped = false;
-          const postResult = async (id, result) => {
+          const postResult = async (payload) => {
             const response = await fetch(BRIDGE_RESULT_PATH, {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                id,
-                ok: result.ok === true,
-                reply: result.ok === true ? result.reply : undefined,
-                error: result.ok === true ? undefined : result.error,
-              }),
+              body: JSON.stringify(payload),
             });
             if (!response.ok) throw new Error('result rejected with ' + String(response.status));
           };
           const poll = async () => {
-            if (asking || stopped) return;
+            if (busy || stopped) return;
             let command = null;
             try {
               const response = await fetch(BRIDGE_POLL_PATH, {
@@ -1059,20 +1138,39 @@ window.__ModuleLoader__.load({
             } catch (error) {
               return;
             }
-            if (command === null || stopped || typeof command.id !== 'string' || typeof command.prompt !== 'string') return;
-            asking = true;
+            if (command === null || stopped || typeof command.id !== 'string') return;
+            const kind = command.kind === 'read' ? 'read' : 'ask';
+            if (kind === 'ask' && typeof command.prompt !== 'string') return;
+            busy = true;
             try {
-              const result = await runAgentAsk(command.prompt, typeof command.sessionId === 'string' ? command.sessionId : undefined);
-              await postResult(command.id, result);
+              const outcome = kind === 'read'
+                ? await runAgentRead(command)
+                : await runAgentAsk(command.prompt, typeof command.sessionId === 'string' ? command.sessionId : undefined);
+              const payload = outcome.ok === true
+                ? {
+                  id: command.id,
+                  ok: true,
+                  result: kind === 'read'
+                    ? {
+                      transcript: outcome.transcript,
+                      messageCount: outcome.messageCount,
+                      truncated: outcome.truncated,
+                      url: outcome.url,
+                      title: outcome.title,
+                    }
+                    : { reply: outcome.reply },
+                }
+                : { id: command.id, ok: false, error: outcome.error };
+              await postResult(payload);
             } catch (error) {
               console.warn('[deepseek-webchat] agent bridge failed', error);
               try {
-                await postResult(command.id, { ok: false, error: 'client-error' });
+                await postResult({ id: command.id, ok: false, error: 'client-error' });
               } catch (postError) {
                 console.warn('[deepseek-webchat] could not post the agent result', postError);
               }
             } finally {
-              asking = false;
+              busy = false;
             }
           };
           const timer = window.setInterval(() => {

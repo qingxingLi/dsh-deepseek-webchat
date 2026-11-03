@@ -12,6 +12,7 @@
 - **环境提示处理**：把访客 UA 归一为普通 Chrome UA，并预置 DeepSeek 自己的「已知晓」开关，避免反复弹出「使用环境异常」。
 - **导入 DSH 对话（可选消息）**：在任意会话输入框工具栏点箭头按钮，弹出历史消息选择面板（每条消息前方复选框，支持全选/全不选），勾选后再整理成 Markdown 填入网页版输入框；分享内容会带上 agent 的工具调用（名称、参数摘要、结果摘要），保留 @ 引用路径；不自动发送。
 - **agent 工具 `deepseek_web_ask`**：agent 把问题发到网页版并取回回复；面板先弹确认条（取消 / 本会话都允许 / 允许发送），批准后才发送。
+- **agent 工具 `deepseek_web_read`**：读取当前面板里网页版**已显示**的对话（`[user]/[assistant]` 逐轮），交给 agent 总结/分析/存档；只读本机页面，不发送、不消耗网页版上下文。
 - **多轮连续追问**：网页版保留当前对话上下文，可连续调用同一个工具追问；配合「本会话都允许」可自动多轮。
 - **内置技能 `deepseek-web-ask` + 系统提示段**：装好后 agent 自动知道何时该用、怎么用、失败怎么处理。
 
@@ -60,20 +61,36 @@ dsh plugin --profile desktop add "link:/absolute/path/to/dsh-deepseek-webchat"
 - **本会话都允许**：当前 DSH 会话内后续提问不再逐次确认（适合自动多轮，内存级，插件重载/重启后重置）
 - **允许发送**：只允许这一次
 
+### 让 agent 读取网页版已有对话
+
+```
+读取一下网页版当前的对话，总结成要点
+把网页版刚才的讨论存到工作区 md 文件
+```
+
+`deepseek_web_read` 参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `max_chars` | number | 返回字符上限，默认 12000，上限 60000 |
+| `last` | number | 只读最近 N 条消息，默认 0 = 全部，上限 200 |
+
+返回：`[user]/[assistant]` 逐轮文本、消息总数、是否截断、页面 URL/标题。只读取页面当前可见的消息（长历史可能只加载了最近一部分），需要面板已登录。
+
 ## 工作原理
 
 ```
 DSH agent
-  │ deepseek_web_ask(prompt)
+  │ deepseek_web_ask(prompt) / deepseek_web_read(...)
   ▼
 Host 半（index.js）                          Client 半（client.js）
-  ├─ 工具执行，把提问放进队列                  ├─ 每 2 秒轮询 /dsh-deepseek-webchat/poll
-  ├─ webServer 注册两个同源路由：               ├─ 收到后打开面板、弹确认条
-  │   /dsh-deepseek-webchat/poll                ├─ 允许后往 webview 的输入框写文本并点发送
-  │   /dsh-deepseek-webchat/result              ├─ 轮询页面上的助手回复，等生成结束
-  ├─ 路由用 ctx.connection 做连接鉴权           └─ 回复 POST /result 回 Host
+  ├─ 工具执行，把提问/读取请求放进队列          ├─ 每 2 秒轮询 /dsh-deepseek-webchat/poll
+  ├─ webServer 注册两个同源路由：               ├─ ask：打开面板、弹确认条、发送、等回复
+  │   /dsh-deepseek-webchat/poll                ├─ read：读取当前面板 DOM 里的 .ds-message
+  │   /dsh-deepseek-webchat/result              └─ 结果 POST /result 回 Host
+  ├─ 路由用 ctx.connection 做连接鉴权
   ├─ 注册技能 + 系统提示段
-  └─ 等 /result 返回回复 ───────────────────────────┘
+  └─ 等 /result 返回结果 ───────────────────────────┘
 ```
 
 - 面板的 `<webview>` 复用桌面壳的 `globalThis.dshDesktop.browser` 租约（与官方右侧栏「浏览器」同一个机制）；主进程批准租约后才允许 attach。
