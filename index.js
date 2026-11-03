@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -87,34 +87,20 @@ export function apply(ctx) {
   /**
    * The embedded guest session denies every permission, including the Clipboard
    * API, so the page's own copy buttons cannot reach the system clipboard. Bridge
-   * reads/writes through the Host process's platform clipboard commands instead.
+   * writes through the Host process's platform clipboard commands instead.
    * shortcut: Linux assumes wl-clipboard is installed; fall back to xclip if needed.
    */
-  const clipboardCommands = () => {
-    if (process.platform === 'darwin') return { read: ['pbpaste', []], write: ['pbcopy', []] };
+  const clipboardWriteCommand = () => {
+    if (process.platform === 'darwin') return ['pbcopy', []];
     if (process.platform === 'win32') {
-      return {
-        read: ['powershell', ['-NoProfile', '-Command', 'Get-Clipboard -Raw']],
-        write: ['powershell', ['-NoProfile', '-Command', '[Console]::In.ReadToEnd() | Set-Clipboard']],
-      };
+      return ['powershell', ['-NoProfile', '-Command', '[Console]::In.ReadToEnd() | Set-Clipboard']];
     }
-    return { read: ['wl-paste', ['-n']], write: ['wl-copy', []] };
+    return ['wl-copy', []];
   };
 
-  const readClipboard = () => new Promise((resolve, reject) => {
-    const command = clipboardCommands();
-    execFile(command.read[0], command.read[1], { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(typeof stdout === 'string' ? stdout : String(stdout));
-    });
-  });
-
   const writeClipboard = (text) => new Promise((resolve, reject) => {
-    const command = clipboardCommands();
-    const child = spawn(command.write[0], command.write[1], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const command = clipboardWriteCommand();
+    const child = spawn(command[0], command[1], { stdio: ['pipe', 'ignore', 'ignore'] });
     child.on('error', reject);
     child.on('exit', (code) => {
       if (code === 0) resolve();
@@ -377,10 +363,6 @@ export function apply(ctx) {
         return;
       }
       try {
-        if (body.action === 'read') {
-          json(res, 200, { ok: true, text: await readClipboard() });
-          return;
-        }
         if (body.action === 'write' && typeof body.text === 'string' && body.text.length <= MAX_CLIPBOARD_CHARS) {
           await writeClipboard(body.text);
           json(res, 200, { ok: true });
