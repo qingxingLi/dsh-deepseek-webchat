@@ -23,6 +23,48 @@ window.__ModuleLoader__.load({
     /** Transcript bounds for one import into the web composer. */
     const TRANSCRIPT_MAX_CHARS = 8000;
     const TRANSCRIPT_MAX_MESSAGES = 60;
+    /** Alias tokens the DeepSeek page paints with; DSH skins override the same names. */
+    const THEME_TOKEN_NAMES = [
+      '--dsw-alias-label-primary',
+      '--dsw-alias-label-secondary',
+      '--dsw-alias-label-tertiary',
+      '--dsw-alias-label-caption',
+      '--dsw-alias-label-dimmed',
+      '--dsw-alias-label-primary-foreground',
+      '--dsw-alias-label-primary-inverted',
+      '--dsw-alias-bg-base',
+      '--dsw-alias-bg-layer-1',
+      '--dsw-alias-bg-layer-2',
+      '--dsw-alias-bg-layer-3',
+      '--dsw-alias-bg-overlay',
+      '--dsw-alias-bg-multi-select',
+      '--dsw-alias-bg-skeleton',
+      '--dsw-alias-border-l1',
+      '--dsw-alias-border-l2',
+      '--dsw-alias-border-l2-darkmode-thin',
+      '--dsw-alias-border-l3',
+      '--dsw-alias-border-inverted',
+      '--dsw-alias-brand-primary',
+      '--dsw-alias-brand-text',
+      '--dsw-alias-button-primary-fill',
+      '--dsw-alias-button-primary-hover',
+      '--dsw-alias-button-ghost-active-fill',
+      '--dsw-alias-button-ghost-active-border',
+      '--dsw-alias-interactive-bg-hover',
+      '--dsw-alias-interactive-bg-hover-danger',
+      '--dsw-alias-interactive-bg-hover-accent',
+      '--dsw-alias-markdown-citation',
+      '--dsw-alias-markdown-placeholder',
+      '--dsw-alias-state-error-primary',
+      '--dsw-alias-state-error-secondary',
+      '--dsw-alias-state-warn-primary',
+      '--dsw-alias-state-warn-secondary',
+      '--dsw-alias-state-warn-tertiary',
+      '--dsw-alias-state-warn-label',
+      '--dsw-alias-state-success-secondary',
+      '--dsw-alias-state-idle-primary',
+      '--dsw-specific-sidebar-fill',
+    ];
     /** Host bridge for agent-initiated questions: same-origin routes on the Host web server. */
     const BRIDGE_POLL_PATH = '/dsh-deepseek-webchat/poll';
     const BRIDGE_RESULT_PATH = '/dsh-deepseek-webchat/result';
@@ -453,6 +495,97 @@ window.__ModuleLoader__.load({
 })()`;
     }
 
+    /**
+     * Read the live DSH alias colours (built-in theme or third-party skin) and
+     * flatten translucent surfaces so the guest page can use them as solid paint.
+     */
+    function readThemePalette(fallbackCanvas) {
+      if (typeof document === 'undefined' || document.body === null) return null;
+      const probe = document.createElement('span');
+      probe.style.position = 'absolute';
+      probe.style.left = '-9999px';
+      probe.style.top = '-9999px';
+      probe.style.width = '0';
+      probe.style.height = '0';
+      document.body.appendChild(probe);
+      const normalize = (value) => {
+        if (typeof value !== 'string' || value.trim() === '') return null;
+        probe.style.backgroundColor = '';
+        probe.style.backgroundColor = value;
+        if (probe.style.backgroundColor === '') return null;
+        const computed = window.getComputedStyle(probe).backgroundColor;
+        return typeof computed === 'string' && computed !== '' ? computed : null;
+      };
+      const parse = (value) => {
+        const match = /rgba?\(([^)]+)\)/.exec(value);
+        if (match === null) return null;
+        const parts = match[1].split(',').map((part) => Number.parseFloat(part.trim()));
+        if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null;
+        return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+      };
+      try {
+        let canvasColor = null;
+        for (const source of [document.documentElement, document.body]) {
+          const candidate = normalize(window.getComputedStyle(source).backgroundColor);
+          const parsed = candidate === null ? null : parse(candidate);
+          if (parsed !== null && parsed.a >= 1) {
+            canvasColor = parsed;
+            break;
+          }
+        }
+        if (canvasColor === null) {
+          const parsed = parse(normalize(fallbackCanvas));
+          if (parsed !== null) canvasColor = parsed;
+        }
+        const style = window.getComputedStyle(document.body);
+        const tokens = {};
+        for (const name of THEME_TOKEN_NAMES) {
+          let raw = '';
+          try {
+            raw = style.getPropertyValue(name).trim();
+          } catch (error) {
+            raw = '';
+          }
+          const parsed = parse(normalize(raw) ?? '');
+          if (parsed === null) continue;
+          if (parsed.a < 1) {
+            if (canvasColor === null) continue;
+            const alpha = parsed.a;
+            tokens[name] = 'rgb('
+              + Math.round(parsed.r * alpha + canvasColor.r * (1 - alpha)) + ', '
+              + Math.round(parsed.g * alpha + canvasColor.g * (1 - alpha)) + ', '
+              + Math.round(parsed.b * alpha + canvasColor.b * (1 - alpha)) + ')';
+          } else {
+            tokens[name] = 'rgb(' + Math.round(parsed.r) + ', ' + Math.round(parsed.g) + ', ' + Math.round(parsed.b) + ')';
+          }
+        }
+        return { tokens, signature: JSON.stringify(tokens) };
+      } catch (error) {
+        return null;
+      } finally {
+        probe.remove();
+      }
+    }
+
+    /** Inject the skin palette into the guest page's own alias tokens. */
+    function paletteScript(tokens) {
+      return `(() => {
+  const tokens = ${JSON.stringify(tokens)};
+  const id = 'dsh-skin-palette';
+  let style = document.getElementById(id);
+  if (style === null) {
+    style = document.createElement('style');
+    style.id = id;
+    (document.head || document.documentElement).appendChild(style);
+  }
+  const declarations = [];
+  for (const name of Object.keys(tokens)) declarations.push(name + ': ' + tokens[name] + ' !important;');
+  const selector = ':root, html, html[data-ds-dark-theme], body, body[data-ds-dark-theme]';
+  style.textContent = selector + ' {' + String.fromCharCode(10) + declarations.join(String.fromCharCode(10)) + String.fromCharCode(10) + '}';
+  return true;
+})()`;
+    }
+
     /** DSH sessions whose user chose "allow everything for this session". */
     const allowedAskSessions = new Set();
     /** The mounted panel publishes its ask/read handlers here while its guest is ready. */
@@ -743,9 +876,11 @@ window.__ModuleLoader__.load({
             let timer;
             let poll;
             let clipboardPoller;
+            let themePoller;
             let pendingFill = null;
             let noticeTimer;
             let askPlacement = null;
+            let appliedThemeSignature = '';
             const lifetime = new AbortController();
             setStatus('loading');
 
@@ -906,18 +1041,34 @@ window.__ModuleLoader__.load({
               }
             };
 
-            const applyGuestTheme = () => {
-              if (element === undefined) return;
+            const themeScheme = () => {
               const snapshot = ctx.theme !== undefined && typeof ctx.theme.getTheme === 'function' ? ctx.theme.getTheme() : null;
               const active = snapshot !== null && snapshot.active !== null && typeof snapshot.active === 'object' ? snapshot.active : null;
               const scheme = active !== null ? active.colorScheme : null;
-              if (scheme !== 'dark' && scheme !== 'light') return;
+              return scheme === 'dark' || scheme === 'light' ? scheme : null;
+            };
+            const applyGuestTheme = () => {
+              if (element === undefined) return;
+              const scheme = themeScheme();
+              if (scheme === null) return;
               void element.executeJavaScript(themeScript(scheme === 'dark'), false).catch((error) => {
                 console.warn('[deepseek-webchat] could not apply the DSH theme', error);
               });
             };
+            const applyThemePalette = () => {
+              if (element === undefined || !ready) return;
+              const scheme = themeScheme();
+              const palette = readThemePalette(scheme === 'dark' ? '#101624' : '#f7f8fb');
+              if (palette === null || Object.keys(palette.tokens).length === 0) return;
+              if (palette.signature === appliedThemeSignature) return;
+              appliedThemeSignature = palette.signature;
+              void element.executeJavaScript(paletteScript(palette.tokens), false).catch((error) => {
+                console.warn('[deepseek-webchat] could not apply the skin palette', error);
+              });
+            };
             const disposeTheme = typeof ctx.on === 'function' ? ctx.on('theme/change', () => {
               applyGuestTheme();
+              applyThemePalette();
             }) : undefined;
 
             const finish = () => {
@@ -930,6 +1081,7 @@ window.__ModuleLoader__.load({
               flushFill();
               installClipboardBridge();
               applyGuestTheme();
+              applyThemePalette();
             };
 
             const flushFill = () => {
@@ -1057,6 +1209,7 @@ window.__ModuleLoader__.load({
                 syncing = false;
                 installClipboardBridge();
                 applyGuestTheme();
+                applyThemePalette();
               }
             };
 
@@ -1119,6 +1272,9 @@ window.__ModuleLoader__.load({
                 clipboardPoller = window.setInterval(() => {
                   void drainClipboardWrites();
                 }, 800);
+                themePoller = window.setInterval(() => {
+                  applyThemePalette();
+                }, 1500);
                 stageElement.appendChild(view);
               } catch (error) {
                 console.warn('[deepseek-webchat] cannot start the desktop browser guest', error);
@@ -1136,6 +1292,7 @@ window.__ModuleLoader__.load({
               window.clearTimeout(noticeTimer);
               window.clearInterval(poll);
               window.clearInterval(clipboardPoller);
+              window.clearInterval(themePoller);
               if (disposeTheme !== undefined) disposeTheme();
               window.clearTimeout(approvalTimer.current);
               const resolveAsk = askResolver.current;
